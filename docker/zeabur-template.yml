@@ -1,0 +1,289 @@
+# yaml-language-server: $schema=https://schema.zeabur.app/template.json
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: Douyin TikTok API (Oracle ARM)
+spec:
+  description: Self-hosted Douyin and TikTok API with TimescaleDB, Redis, browser RPC and shared persistent media.
+  readme: |
+    Deploy on a dedicated ARM64 or AMD64 server. Only the API needs a public domain.
+    Generate independent random values for the four secret variables; keep the master key for future upgrades.
+    The Zeabur image runs migrations before API, worker and downloader, which share /data.
+    Browser RPC and databases use private networking. Initialize the administrator using the API startup log token.
+    Apache-2.0: https://github.com/Evil0ctal/Douyin_TikTok_Download_API/blob/main/LICENSE
+    Source: https://github.com/Sakuralaaa/Douyin_TikTok_Download_API
+  variables:
+    - key: DTK_MASTER_KEY
+      type: STRING
+      name: Master encryption key
+      description: Random secret of at least 32 characters. Preserve it when upgrading.
+    - key: DTK_DB_PASSWORD
+      type: STRING
+      name: Database password
+      description: Independent random hexadecimal password for TimescaleDB.
+    - key: DTK_CACHE_PASSWORD
+      type: STRING
+      name: Redis password
+      description: Independent random hexadecimal password for Redis.
+    - key: DTK_DOWNLOAD_KEY
+      type: STRING
+      name: Downloader secret
+      description: Independent random secret shared by API and the internal downloader.
+  services:
+    # Adapted from TimescaleDB SUNIQ1 and Redis KQZHXT templates, with the
+    # versions and PGDATA path required by the upstream production Compose.
+    - name: timescaledb
+      template: PREBUILT_V2
+      spec:
+        source:
+          image: timescale/timescaledb-ha:pg17
+        ports:
+          - id: database
+            port: 5432
+            type: TCP
+        portForwarding:
+          enabled: false
+        healthCheck:
+          type: TCP
+          port: database
+        volumes:
+          - id: data
+            dir: /home/postgres/pgdata/data
+        env:
+          POSTGRES_USER:
+            default: dtk
+            expose: true
+          POSTGRES_DB:
+            default: dtk
+            expose: true
+          POSTGRES_PASSWORD:
+            default: ${DTK_DB_PASSWORD}
+            expose: true
+          POSTGRES_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+            readonly: true
+          POSTGRES_PORT:
+            default: "5432"
+            expose: true
+          POSTGRES_HOST_AUTH_METHOD:
+            default: scram-sha-256
+          PGDATA:
+            default: /home/postgres/pgdata/data
+
+    - name: redis
+      template: PREBUILT_V2
+      spec:
+        source:
+          image: redis:8-alpine
+          command:
+            - /bin/sh
+            - -c
+            - exec redis-server --requirepass "$REDIS_PASSWORD" --appendonly yes --save 60 1 --maxmemory 320mb --maxmemory-policy volatile-lru
+        ports:
+          - id: database
+            port: 6379
+            type: TCP
+        portForwarding:
+          enabled: false
+        healthCheck:
+          type: TCP
+          port: database
+        volumes:
+          - id: data
+            dir: /data
+        env:
+          REDIS_PASSWORD:
+            default: ${DTK_CACHE_PASSWORD}
+            expose: true
+          REDIS_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+            readonly: true
+          REDIS_PORT:
+            default: "6379"
+            expose: true
+
+    - name: browser-rpc
+      template: PREBUILT_V2
+      spec:
+        source:
+          image: ghcr.io/sakuralaaa/douyin_tiktok_download_api-browser:sha-24c7c2cf268c15c850841fd4bddbf8e01c8fd82b
+          runAsUserID: 10001
+        ports:
+          - id: rpc
+            port: 9000
+            type: TCP
+        portForwarding:
+          enabled: false
+        healthCheck:
+          type: HTTP
+          port: rpc
+          http:
+            path: /rpc/health
+        resources:
+          shmSize: 1Gi
+        env:
+          BROWSER_RPC_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+            readonly: true
+          DTK_BROWSER_BACKEND:
+            default: cloak
+          DTK_BROWSER_BIND_HOST:
+            default: 0.0.0.0
+          DTK_BROWSER_BIND_PORT:
+            default: "9000"
+          DTK_BROWSER_PROFILE_ROOT:
+            default: /profiles
+          DTK_BROWSER_WARM_CONTEXTS:
+            default: "1"
+          DTK_BROWSER_MAX_CONCURRENT_MINTS:
+            default: "1"
+          CLOAKBROWSER_AUTO_UPDATE:
+            default: "false"
+          TZ:
+            default: Asia/Shanghai
+
+    - name: dtk
+      template: PREBUILT_V2
+      dependencies:
+        - timescaledb
+        - redis
+        - browser-rpc
+      spec:
+        source:
+          image: ghcr.io/sakuralaaa/douyin_tiktok_download_api-zeabur:sha-24c7c2cf268c15c850841fd4bddbf8e01c8fd82b
+          # Zeabur applies this UID to init containers too. Initialize the
+          # volume as root, then drop privileges before starting the supervisor.
+          runAsUserID: 0
+          command:
+            - python
+            - -c
+            - import os, sys; os.setgroups([]); os.setgid(10001); os.setuid(10001); os.execv(sys.executable, [sys.executable, "/usr/local/bin/zeabur-entrypoint.py"])
+        ports:
+          - id: web
+            port: 8000
+            type: HTTP
+        portForwarding:
+          enabled: false
+        healthCheck:
+          type: HTTP
+          port: web
+          http:
+            path: /readyz
+        volumes:
+          - id: data
+            dir: /data
+        init:
+          - id: data-permissions
+            image: busybox:1.37
+            command:
+              - /bin/sh
+              - -c
+              - mkdir -p /data/media /data/backups && chown 10001:10001 /data /data/media /data/backups
+            volumes:
+              - id: data
+                mountPath: /data
+        env:
+          DTK_SECRET_KEY:
+            default: ${DTK_MASTER_KEY}
+          DTK_DATABASE_URL:
+            default: postgresql+asyncpg://dtk:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/dtk
+          DTK_REDIS_URL:
+            default: redis://:${REDIS_PASSWORD}@${REDIS_HOST}:6379/0
+          DTK_BROWSER_RPC_URL:
+            default: http://${BROWSER_RPC_HOST}:9000
+          DTK_DOWNLOADER_TOKEN:
+            default: ${DTK_DOWNLOAD_KEY}
+          DTK_DOWNLOADER_WORKERS:
+            default: "2"
+          DTK_DOWNLOADER_ITEM_WORKERS:
+            default: "2"
+          DTK_BIND_HOST:
+            default: 0.0.0.0
+          DTK_BIND_PORT:
+            default: "8000"
+          TZ:
+            default: Asia/Shanghai
+localization:
+  zh-CN:
+    description: 在 Oracle ARM 上部署抖音及 TikTok API，包含数据库、Redis、浏览器和持久化下载。
+    variables:
+      - key: DTK_MASTER_KEY
+        name: 主加密密钥
+        description: 至少 32 个字符的随机密钥，升级时必须保留。
+      - key: DTK_DB_PASSWORD
+        name: 数据库密码
+        description: 独立生成的随机十六进制 TimescaleDB 密码。
+      - key: DTK_CACHE_PASSWORD
+        name: Redis 密码
+        description: 独立生成的随机十六进制 Redis 密码。
+      - key: DTK_DOWNLOAD_KEY
+        name: 下载器密钥
+        description: API 与内网下载器共用的独立随机密钥。
+    readme: "数据库和浏览器仅使用内网。API、worker 和下载器共享 /data。首次启动后用日志令牌创建管理员。项目使用 Apache-2.0 许可证，来源见英文说明。"
+  zh-TW:
+    description: 在 Oracle ARM 部署抖音及 TikTok API，包含資料庫、Redis、瀏覽器與持久化下載。
+    variables:
+      - key: DTK_MASTER_KEY
+        name: 主加密金鑰
+        description: 至少 32 個字元的隨機金鑰，升級時必須保留。
+      - key: DTK_DB_PASSWORD
+        name: 資料庫密碼
+        description: 獨立產生的隨機十六進位 TimescaleDB 密碼。
+      - key: DTK_CACHE_PASSWORD
+        name: Redis 密碼
+        description: 獨立產生的隨機十六進位 Redis 密碼。
+      - key: DTK_DOWNLOAD_KEY
+        name: 下載器金鑰
+        description: API 與內網下載器共用的獨立隨機金鑰。
+    readme: "資料庫與瀏覽器僅使用內網。API、worker 與下載器共用 /data。以啟動日誌的權杖建立管理員。授權及來源見英文說明。"
+  ja-JP:
+    description: Oracle ARM 向け Douyin と TikTok API。データベース、Redis、ブラウザー、永続ストレージを含みます。
+    variables:
+      - key: DTK_MASTER_KEY
+        name: マスター暗号鍵
+        description: 32 文字以上のランダムな鍵。更新時も保持してください。
+      - key: DTK_DB_PASSWORD
+        name: データベースのパスワード
+        description: TimescaleDB 用に個別生成したランダムな 16 進数のパスワード。
+      - key: DTK_CACHE_PASSWORD
+        name: Redis のパスワード
+        description: Redis 用に個別生成したランダムな 16 進数のパスワード。
+      - key: DTK_DOWNLOAD_KEY
+        name: ダウンローダーの鍵
+        description: API と内部ダウンローダーで共有する個別のランダムな鍵。
+    readme: "API のみ公開してください。起動ログのトークンで管理者を作成します。ライセンスとソースは英語の説明を参照してください。"
+  es-ES:
+    description: API de Douyin y TikTok para Oracle ARM, con base de datos, Redis, navegador y almacenamiento persistente.
+    variables:
+      - key: DTK_MASTER_KEY
+        name: Clave maestra de cifrado
+        description: Clave aleatoria de al menos 32 caracteres. Consérvela al actualizar.
+      - key: DTK_DB_PASSWORD
+        name: Contraseña de la base de datos
+        description: Contraseña hexadecimal aleatoria e independiente para TimescaleDB.
+      - key: DTK_CACHE_PASSWORD
+        name: Contraseña de Redis
+        description: Contraseña hexadecimal aleatoria e independiente para Redis.
+      - key: DTK_DOWNLOAD_KEY
+        name: Clave del descargador
+        description: Clave aleatoria independiente compartida por la API y el descargador interno.
+    readme: "Exponga solo la API. Cree el administrador con el token del registro de inicio. Consulte la descripción en inglés para la licencia y el código fuente."
+  id-ID:
+    description: API Douyin dan TikTok untuk Oracle ARM dengan database, Redis, browser, dan penyimpanan persisten.
+    variables:
+      - key: DTK_MASTER_KEY
+        name: Kunci enkripsi utama
+        description: Kunci acak minimal 32 karakter. Pertahankan saat memperbarui.
+      - key: DTK_DB_PASSWORD
+        name: Kata sandi database
+        description: Kata sandi heksadesimal acak dan terpisah untuk TimescaleDB.
+      - key: DTK_CACHE_PASSWORD
+        name: Kata sandi Redis
+        description: Kata sandi heksadesimal acak dan terpisah untuk Redis.
+      - key: DTK_DOWNLOAD_KEY
+        name: Kunci pengunduh
+        description: Kunci acak terpisah yang digunakan bersama oleh API dan pengunduh internal.
+    readme: "Publikasikan hanya API. Buat administrator dengan token pada log awal. Lihat deskripsi bahasa Inggris untuk lisensi dan sumber."
