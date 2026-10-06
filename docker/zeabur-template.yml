@@ -108,7 +108,7 @@ spec:
       template: PREBUILT_V2
       spec:
         source:
-          image: ghcr.io/sakuralaaa/douyin_tiktok_download_api-browser:sha-24c7c2cf268c15c850841fd4bddbf8e01c8fd82b
+          image: ghcr.io/sakuralaaa/douyin_tiktok_download_api-browser:sha-6d0789283c4864716fa116b00704969d92f8879d
           runAsUserID: 10001
         ports:
           - id: rpc
@@ -153,7 +153,7 @@ spec:
         - browser-rpc
       spec:
         source:
-          image: ghcr.io/sakuralaaa/douyin_tiktok_download_api-zeabur:sha-24c7c2cf268c15c850841fd4bddbf8e01c8fd82b
+          image: ghcr.io/sakuralaaa/douyin_tiktok_download_api-zeabur:sha-6d0789283c4864716fa116b00704969d92f8879d
           # Zeabur applies this UID to init containers too. Initialize the
           # volume as root, then drop privileges before starting the supervisor.
           runAsUserID: 0
