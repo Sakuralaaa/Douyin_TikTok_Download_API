@@ -242,8 +242,8 @@ export default function Proxies() {
   const rows = useMemo(() => {
     const needle = search.trim().toLowerCase()
     return (list.data ?? []).filter((row) => {
-      if (healthFilter === 'healthy' && !row.healthy) return false
-      if (healthFilter === 'unhealthy' && row.healthy) return false
+      if (healthFilter === 'healthy' && (!row.last_check_at || !row.healthy)) return false
+      if (healthFilter === 'unhealthy' && (!row.last_check_at || row.healthy)) return false
       if (!needle) return true
       return [row.label, row.url_masked, row.country, row.id]
         .filter(Boolean)
@@ -313,8 +313,13 @@ export default function Proxies() {
       id: 'health',
       header: t('console:field.state'),
       width: '130px',
-      sortValue: (row) => (row.healthy ? 1 : 0),
-      cell: (row) => <StatusBadge kind="health" value={row.healthy ? 'healthy' : 'unhealthy'} />,
+      sortValue: (row) => (row.last_check_at ? (row.healthy ? 1 : 0) : -1),
+      cell: (row) => (
+        <StatusBadge
+          kind="health"
+          value={row.last_check_at ? (row.healthy ? 'healthy' : 'unhealthy') : 'unknown'}
+        />
+      ),
     },
     {
       id: 'label',

@@ -23,6 +23,7 @@ case "$kind" in
                 dtk --version
                 test -s "$DTK_CONSOLE_DIR/index.html"
                 python -c "import dtk.api.app, dtk.worker, dtk.db.migrate"
+                python -c "import httpx; httpx.Client(proxy=\"socks5h://127.0.0.1:1080\").close()"
             '
         docker run --rm --network none "$image" help
         result=0
@@ -76,6 +77,8 @@ async def main():
 
 asyncio.run(main())
 PY
+        # Verify SOCKS authentication and proxy-side DNS with a real browser.
+        docker exec -i "$container" python - < docker/smoke-proxy.py
         ;;
     downloader)
         docker run -d --name "$container" --network none --read-only \

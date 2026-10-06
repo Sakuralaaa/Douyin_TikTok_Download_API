@@ -276,7 +276,13 @@ def proxy_settings(proxy: ProxyEndpoint | None) -> dict[str, str] | None:
     """Translate a proxy endpoint into the driver's proxy argument."""
     if proxy is None:
         return None
-    settings = {"server": proxy.server}
+    # Chromium's SOCKS5 resolves destination names at the proxy. It does not
+    # recognize the socks5h alias used by HTTP clients; keep that alias in the
+    # stored URL and GeoIP probe, but normalize it at the browser boundary.
+    server = proxy.server
+    if server.startswith("socks5h://"):
+        server = "socks5://" + server.removeprefix("socks5h://")
+    settings = {"server": server}
     if proxy.username:
         settings["username"] = proxy.username
     if proxy.password:
