@@ -1,5 +1,7 @@
 # Container images and orchestration
 
+For this fork's prebuilt GHCR images, see [GitHub Actions and Oracle ARM deployment](README.ghcr.zh-CN.md).
+
 Everything needed to run dtk on one host. The design this implements is
 `docs/design/09-deployment.md`, with the container rules from
 `docs/design/08-security.md` and the browser-rpc contract from

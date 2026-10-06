@@ -34,9 +34,8 @@ ARG CLOAKBROWSER_COMMIT=""
 # the shape Playwright uses and had never been run.
 ARG CLOAKBROWSER_INSTALL_CMD="python -m cloakbrowser install"
 
-# Where the browser is installed. CloakBrowser reads no environment variable of
-# its own - checked by grepping the package - so the only lever is HOME, which
-# is why the install and the runtime have to agree through the shim below.
+# Keep the browser in the image and bridge its cache to the writable runtime
+# HOME through browser-entrypoint.sh. Do not fetch newer binaries at startup.
 ARG CLOAKBROWSER_HOME=/opt/cloakbrowser
 
 ARG DTK_UID=10001
@@ -46,9 +45,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONPATH=/srv
+    PYTHONPATH=/srv \
+    CLOAKBROWSER_AUTO_UPDATE=false
 
-# The browser binaries must not land under /tmp. Compose mounts a 256MB tmpfs
+# The browser binaries must not land under /tmp. Compose mounts a tmpfs
 # over /tmp at runtime, which would hide a Chromium installed there at build
 # time and could not hold it anyway - the container would come up, answer
 # /rpc/health, and fail every mint with "executable doesn't exist".
@@ -108,8 +108,8 @@ RUN if [ -n "${CLOAKBROWSER_COMMIT}" ]; then \
       pip install --no-cache-dir "cloakbrowser @ git+${CLOAKBROWSER_REPO}@${CLOAKBROWSER_COMMIT}" \
       && mkdir -p "${CLOAKBROWSER_HOME}" \
       && HOME="${CLOAKBROWSER_HOME}" sh -c "${CLOAKBROWSER_INSTALL_CMD}" \
-      && HOME="${CLOAKBROWSER_HOME}" python -m cloakbrowser info \
-         | grep -qE "^Installed: *True"; \
+      && HOME="${CLOAKBROWSER_HOME}" python -c \
+         'from cloakbrowser import binary_info; info = binary_info(); print(info); assert info["installed"], info'; \
     else \
       echo "browser-rpc: built without CLOAKBROWSER_COMMIT; only the fake backend is available" >&2; \
     fi

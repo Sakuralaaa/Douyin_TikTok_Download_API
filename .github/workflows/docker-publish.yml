@@ -1,224 +1,241 @@
-# Build the images and push them to Docker Hub.
-#
-# Two images, and deliberately not three:
-#
-#   dtk (the app)   api, worker and migrate are one image that differs only in
-#                   the verb handed to the entrypoint. This is the image almost
-#                   everyone means by "the image".
-#   dtk-downloader  the Go media sidecar. 9 MB, optional at runtime, and worth
-#                   publishing so that `--profile downloader` does not make
-#                   every operator build Go.
-#
-#   browser-rpc is NOT published. It installs CloakBrowser from a pinned commit
-#   passed in as a build argument, so an image built here would ship somebody
-#   else's browser under this project's name, and the pin - which is a security
-#   control, see docker/Dockerfile.browser - would become ours rather than the
-#   operator's. It stays a local build; docker/README.md says how.
-#
-# Both images are built for linux/amd64 and linux/arm64. The slow parts do not
-# run under emulation: the console stage and the Go build are pinned to
-# BUILDPLATFORM and produce architecture-independent or cross-compiled output
-# (see the two Dockerfiles).
-name: Publish Docker images
+name: Publish GHCR images
 
-# Only `release` and version tags. NOT `main`, on purpose.
-#
-# Publishing on every merge means the `latest` tag names whatever was pushed a
-# few minutes ago, so somebody following the README pulls work in progress. It
-# also spends six minutes of buildx and QEMU per commit to produce an image that
-# in most cases nobody ever pulls.
-#
-# `main` stays the trunk and is still fully tested by ci.yml on every push. What
-# moved here is publishing, which is a decision: fast-forward `release` to the
-# commit you want to be `latest`.
-#
-#     git push origin main:release
-#
-# A `v*` tag publishes too, and is the right thing for a version people should
-# be able to come back to.
 on:
   push:
-    branches: [release]
+    branches: [main, release]
     tags: ["v*"]
+    paths:
+      - ".github/workflows/docker-publish.yml"
+      - "docker/**"
+      - "src/**"
+      - "web/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".dockerignore"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/docker-publish.yml"
+      - "docker/**"
+      - "src/**"
+      - "web/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".dockerignore"
   workflow_dispatch:
     inputs:
-      push:
-        description: "Push to Docker Hub (off = build only, to test the workflow)"
+      publish:
+        description: "Publish the tested images to GHCR"
         type: boolean
-        default: false
+        default: true
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ghcr-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # Change these two together with the Docker Hub repositories they name.
-  APP_IMAGE: evil0ctal/douyin_tiktok_download_api
-  DOWNLOADER_IMAGE: evil0ctal/douyin_tiktok_download_api-downloader
+permissions:
+  contents: read
 
 jobs:
-  publish:
-    name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.image }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
     permissions:
       contents: read
+      packages: write
     strategy:
-      # One failing image must not cancel the other: a downloader build that
-      # breaks is not a reason to withhold the application image.
       fail-fast: false
       matrix:
-        include:
-          - name: app
-            image: evil0ctal/douyin_tiktok_download_api
-            dockerfile: docker/Dockerfile
-            # No VERSION arg: this image carries its version in the installed
-            # package, which the smoke test below prints.
-            build_args: ""
-            description: >-
-              Self-hosted Douyin and TikTok data API. REST, MCP and a web
-              console, with a self-maintaining identity pool.
-          - name: downloader
-            image: evil0ctal/douyin_tiktok_download_api-downloader
-            dockerfile: docker/Dockerfile.downloader
-            build_args: VERSION=${{ github.ref_name }}
-            description: >-
-              Media downloader sidecar for Douyin_TikTok_Download_API. A static
-              Go binary on scratch.
-
+        image: [app, browser, downloader]
+        platform:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      PUBLISH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+      IMAGE_KIND: ${{ matrix.image }}
+      IMAGE_ARCH: ${{ matrix.platform.arch }}
     steps:
       - uses: actions/checkout@v7
         with:
-          # The version stamped into the image comes from `git describe`, which
-          # needs the tags and enough history to find the nearest one.
           fetch-depth: 0
+          persist-credentials: false
 
-      # Whether to push is not a property of the event alone. A fork has no
-      # credentials, and a manual run defaults to build-only so the workflow can
-      # be exercised without publishing anything.
-      - name: Decide whether to push
-        id: mode
-        env:
-          HAS_CREDENTIALS: ${{ secrets.DOCKERHUB_TOKEN != '' }}
-          MANUAL_PUSH: ${{ inputs.push }}
+      - name: Image names and pinned browser
+        id: config
+        shell: bash
         run: |
-          if [ "${HAS_CREDENTIALS}" != "true" ]; then
-            echo "push=false" >> "$GITHUB_OUTPUT"
-            echo "No DOCKERHUB_TOKEN; building without pushing." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "push=${MANUAL_PUSH}" >> "$GITHUB_OUTPUT"
-          else
-            echo "push=true" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          repository="${GITHUB_REPOSITORY,,}"
+          image="ghcr.io/${repository}"
+          dockerfile="docker/Dockerfile"
+          case "$IMAGE_KIND" in
+            browser) image+="-browser"; dockerfile+=".browser" ;;
+            downloader) image+="-downloader"; dockerfile+=".downloader" ;;
+          esac
+          source docker/browser-version.env
+          [[ "$CLOAKBROWSER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "image=$image"
+            echo "dockerfile=$dockerfile"
+            echo "local_tag=dtk-${IMAGE_KIND}:smoke"
+            echo "platform_tag=${image}:sha-${GITHUB_SHA}-${IMAGE_ARCH}"
+            echo "version=$(git describe --tags --always)"
+            echo "browser_repo=$CLOAKBROWSER_REPO"
+            echo "browser_commit=$CLOAKBROWSER_COMMIT"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Version
-        id: version
-        run: echo "app_version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
+      - name: Validate shell and Compose configuration
+        if: matrix.image == 'app' && matrix.platform.arch == 'amd64'
+        run: |
+          bash -n docker/smoke-images.sh
+          docker compose -f docker/compose.yml config -q
+          docker compose -f docker/compose.yml -f docker/compose.ghcr.yml \
+            --profile browser --profile downloader config --format json \
+            | jq -e '[.services | to_entries[] | select(.key != "postgres" and .key != "redis") | .value] | all(.[]; .build == null and (.image | startswith("ghcr.io/")))'
 
-      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
 
-      - name: Log in to Docker Hub
-        if: steps.mode.outputs.push == 'true'
+      # Build and launch Chromium on native runners rather than under QEMU.
+      - name: Build native image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ steps.config.outputs.dockerfile }}
+          platforms: linux/${{ matrix.platform.arch }}
+          load: true
+          push: false
+          tags: ${{ steps.config.outputs.local_tag }}
+          build-args: |
+            VERSION=${{ steps.config.outputs.version }}
+            CLOAKBROWSER_REPO=${{ steps.config.outputs.browser_repo }}
+            CLOAKBROWSER_COMMIT=${{ steps.config.outputs.browser_commit }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.config.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
+          provenance: false
+          sbom: false
+
+      - name: Smoke test the built image
+        env:
+          LOCAL_IMAGE: ${{ steps.config.outputs.local_tag }}
+        run: bash docker/smoke-images.sh "$IMAGE_KIND" "$LOCAL_IMAGE"
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `latest` follows `release`, and a semver tag also claims it.
-      #
-      # It used to follow the default branch, which was right while `main` was
-      # the only thing that published. Now that publishing is its own branch,
-      # tying `latest` to `main` would mean the tag moved on a commit that never
-      # built an image.
-      #
-      # Every push also gets an immutable `sha-<commit>` tag, which is the one
-      # to pin in production. A branch push additionally gets a moving tag named
-      # after the branch.
+      # Moving tags are assembled only after all six native builds pass.
+      - name: Push tested architecture and record digest
+        if: env.PUBLISH == 'true'
+        env:
+          LOCAL_IMAGE: ${{ steps.config.outputs.local_tag }}
+          PLATFORM_TAG: ${{ steps.config.outputs.platform_tag }}
+        run: |
+          set -euo pipefail
+          docker tag "$LOCAL_IMAGE" "$PLATFORM_TAG"
+          docker push "$PLATFORM_TAG"
+          reference=$(docker image inspect "$PLATFORM_TAG" --format '{{index .RepoDigests 0}}')
+          [[ "$reference" == *@sha256:* ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          jq -n --arg reference "$reference" --arg arch "$IMAGE_ARCH" \
+            '{reference: $reference, architecture: $arch}' \
+            > "$RUNNER_TEMP/digests/${IMAGE_ARCH}.json"
+
+      - name: Upload image digest
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/digests/*.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ matrix.image }} manifest
+    needs: build
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [app, browser, downloader]
+    steps:
+      - name: Image name
+        id: config
+        env:
+          IMAGE_KIND: ${{ matrix.image }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          case "$IMAGE_KIND" in
+            browser) image+="-browser" ;;
+            downloader) image+="-downloader" ;;
+          esac
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Download tested digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Tags and labels
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ matrix.image }}
-          # Explicit, rather than leaning on `latest=auto`: the rule below says
-          # exactly when `latest` moves, and two mechanisms deciding that is one
-          # too many.
+          images: ${{ steps.config.outputs.image }}
           flavor: latest=false
           tags: |
+            type=sha,format=long
+            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=ref,event=branch
-            type=sha,format=long
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v') }}
-          labels: |
-            org.opencontainers.image.title=${{ matrix.image }}
-            org.opencontainers.image.description=${{ matrix.description }}
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.version=${{ steps.version.outputs.app_version }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v') }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: ${{ steps.mode.outputs.push == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: ${{ matrix.build_args }}
-          # Scoped per image, or the two would evict each other's layers.
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
-          provenance: mode=max
-          sbom: true
-
-      # The image is only useful if it starts and carries what it is supposed
-      # to. Three checks that need neither Postgres nor Redis:
-      #
-      #   - the venv and the installed package import and report a version
-      #   - the console build actually reached the runtime stage, which is a
-      #     separate build stage that can silently produce nothing
-      #   - the entrypoint refuses an unknown role rather than starting something
-      #
-      # `dtk --version` is run through a shell on purpose: the entrypoint takes
-      # a ROLE (api, worker, migrate), not a flag, so passing `--version` to it
-      # would test the usage message and nothing else.
-      - name: Smoke test the built image
-        if: matrix.name == 'app'
+      - name: Publish multi-platform manifest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_NAME: ${{ steps.config.outputs.image }}
         run: |
-          docker buildx build --load --platform linux/amd64 \
-            -f ${{ matrix.dockerfile }} -t dtk:smoke \
-            --cache-from type=gha,scope=${{ matrix.name }} .
-          docker run --rm --entrypoint sh dtk:smoke -c '
-            set -e
-            dtk --version
-            test -s "${DTK_CONSOLE_DIR}/index.html"
-            echo "console assets present"
-          '
-          if docker run --rm dtk:smoke not-a-role 2>/dev/null; then
-            echo "entrypoint accepted an unknown role" >&2
-            exit 1
-          fi
-
-      - name: Summary
-        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/digests/amd64.json"
+          test -f "$RUNNER_TEMP/digests/arm64.json"
+          mapfile -t references < <(jq -r '.reference' "$RUNNER_TEMP"/digests/*.json)
+          arguments=()
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] || arguments+=(--tag "$tag")
+          done <<< "$TAGS"
+          docker buildx imagetools create "${arguments[@]}" "${references[@]}"
+          docker buildx imagetools inspect "$IMAGE_NAME:sha-$GITHUB_SHA"
           {
-            echo "### ${{ matrix.image }}"
+            echo "### $IMAGE_NAME"
             echo
-            echo "Pushed: \`${{ steps.mode.outputs.push }}\`"
-            echo "Version: \`${{ steps.version.outputs.app_version }}\`"
+            echo "Native AMD64 and ARM64 builds and smoke tests passed."
             echo
-            echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
+            echo '```text'
+            printf '%s\n' "$TAGS"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  # There is no job here to push this README to Docker Hub. `peter-evans/
-  # dockerhub-description` was tried and Docker Hub answered 403 Forbidden:
-  # the description is account-level metadata, and a Docker Hub *access token*
-  # - which is what DOCKERHUB_TOKEN is, and what publishing images needs -
-  # cannot change it. Only the account password can, and putting an account
-  # password in CI to keep a paragraph in sync is a bad trade.
-  #
-  # Set the description by hand at
-  # hub.docker.com/r/evil0ctal/douyin_tiktok_download_api/settings; it changes
-  # about as often as the project name does.

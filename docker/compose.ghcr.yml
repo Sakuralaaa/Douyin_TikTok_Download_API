@@ -1,0 +1,18 @@
+# Requires Docker Compose 2.24.4+ for !reset. Keep upstream orchestration and
+# volumes, select this fork's prebuilt images, and remove all local builds.
+services:
+  migrate:
+    image: ghcr.io/${DTK_GHCR_OWNER:-sakuralaaa}/douyin_tiktok_download_api:${DTK_GHCR_TAG:-latest}
+    build: !reset null
+  api:
+    image: ghcr.io/${DTK_GHCR_OWNER:-sakuralaaa}/douyin_tiktok_download_api:${DTK_GHCR_TAG:-latest}
+    build: !reset null
+  worker:
+    image: ghcr.io/${DTK_GHCR_OWNER:-sakuralaaa}/douyin_tiktok_download_api:${DTK_GHCR_TAG:-latest}
+    build: !reset null
+  browser-rpc:
+    image: ghcr.io/${DTK_GHCR_OWNER:-sakuralaaa}/douyin_tiktok_download_api-browser:${DTK_GHCR_TAG:-latest}
+    build: !reset null
+  downloader:
+    image: ghcr.io/${DTK_GHCR_OWNER:-sakuralaaa}/douyin_tiktok_download_api-downloader:${DTK_GHCR_TAG:-latest}
+    build: !reset null
