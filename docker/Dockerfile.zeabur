@@ -1,0 +1,21 @@
+# Zeabur volumes belong to one service. Keep API, worker and downloader in
+# that service so media and backups refer to the same persistent directory.
+ARG APP_IMAGE
+ARG DOWNLOADER_IMAGE
+FROM ${DOWNLOADER_IMAGE} AS downloader
+FROM ${APP_IMAGE}
+
+USER root
+COPY --from=downloader /usr/local/bin/downloader /usr/local/bin/downloader
+COPY --chmod=0555 docker/zeabur-entrypoint.py /usr/local/bin/zeabur-entrypoint.py
+RUN mkdir -p /data && chown 10001:10001 /data
+USER 10001:10001
+
+ENV DTK_BIND_HOST=0.0.0.0 \
+    DTK_MEDIA_DIR=/data/media \
+    DTK_BACKUP_DIR=/data/backups \
+    DTK_DOWNLOADER_ROOT=/data/media \
+    DTK_DOWNLOADER_BIND=127.0.0.1:9100 \
+    DTK_DOWNLOADER_URL=http://127.0.0.1:9100
+
+ENTRYPOINT ["python", "/usr/local/bin/zeabur-entrypoint.py"]
